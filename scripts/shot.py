@@ -109,7 +109,9 @@ def main() -> int:
     # Cell dims per size token, matching app/composer.py's SIZE_DIMENSIONS: the
     # viewport has to be the cell, or the shot carries page chrome around it.
     dims = {"xs": (180, 180), "sm": (380, 240), "md": (640, 400), "lg": (1200, 800)}
-    out_dir = Path(args.out) / "signals_stat"
+    # Screenshots are keyed by CATALOG id, not plugin id: the catalog entry that
+    # ships this bundle is "signals", and its validator looks there.
+    out_dir = Path(args.out) / "signals"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
