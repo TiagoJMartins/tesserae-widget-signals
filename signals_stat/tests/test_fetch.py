@@ -6,7 +6,6 @@ through the actual PUT route rather than hand-building store records.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -43,10 +42,10 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _snapshot(generated: datetime, rows: list[dict[str, Any]], *, ttl_hours: int = 12) -> dict:
+def _snapshot(signal_id: str, generated: datetime, rows: list[dict[str, Any]], *, ttl_hours: int = 12) -> dict:
     return {
         "version": "personal_data_bridge_v1",
-        "source_id": "signals",
+        "source_id": f"signals.{signal_id}",
         "generated_at": _iso(generated),
         "expires_at": _iso(generated + timedelta(hours=ttl_hours)),
         "data": {"rows": rows},
@@ -108,11 +107,21 @@ def _pair(app, client: dict[str, str]) -> dict[str, str]:
     return {"Authorization": f"Bearer {paired['token']}", "Content-Type": "application/json"}
 
 
-def _publish(app, rows: list[dict[str, Any]], *, client=CLIENT, generated=None, ttl_hours=12):
+def _publish(
+    app,
+    signal_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    client=CLIENT,
+    generated=None,
+    ttl_hours=12,
+):
     auth = _pair(app, client)
-    body = _snapshot(generated or datetime.now(UTC).replace(microsecond=0), rows, ttl_hours=ttl_hours)
+    body = _snapshot(
+        signal_id, generated or datetime.now(UTC).replace(microsecond=0), rows, ttl_hours=ttl_hours
+    )
     resp = app.test_client().put(
-        "/api/app/v1/personal-data/signals", data=json.dumps(body), headers=auth
+        f"/api/app/v1/personal-data/signals.{signal_id}", data=json.dumps(body), headers=auth
     )
     assert resp.status_code == 200, resp.get_json()
 
@@ -123,18 +132,19 @@ def _fetch(app, server: ModuleType, **options: Any) -> dict[str, Any]:
 
 
 def test_nothing_published(app, server) -> None:
-    assert _fetch(app, server, row_id="slack_unread")["state"] == "unpublished"
+    assert _fetch(app, server, signal="slack_unread")["state"] == "unpublished"
 
 
 def test_published_but_unconfigured(app, server) -> None:
-    _publish(app, [_row("slack_unread")])
+    _publish(app, "slack_unread", [_row("slack_unread")])
     assert _fetch(app, server)["state"] == "unconfigured"
 
 
-def test_reads_the_selected_row(app, server) -> None:
-    _publish(app, [_row("slack_unread", value="on"), _row("build", value=3, unit="fails")])
+def test_reads_the_selected_signal(app, server) -> None:
+    _publish(app, "slack_unread", [_row("slack_unread", value="on")])
+    _publish(app, "build", [_row("build", value=3, unit="fails")])
 
-    out = _fetch(app, server, row_id="build")
+    out = _fetch(app, server, signal="build")
     assert out["state"] == "fresh"
     assert out["label"] == "Build"
     assert out["value"] == 3
@@ -143,60 +153,88 @@ def test_reads_the_selected_row(app, server) -> None:
     assert out["age"] < 5
 
 
-def test_missing_row_does_not_fall_back(app, server) -> None:
-    _publish(app, [_row("slack_unread")])
-    out = _fetch(app, server, row_id="gone")
+def test_missing_signal_does_not_fall_back(app, server) -> None:
+    _publish(app, "slack_unread", [_row("slack_unread")])
+    out = _fetch(app, server, signal="gone")
     assert out["state"] == "missing"
-    assert out["row_id"] == "gone"
+    assert out["signal"] == "gone"
+
+
+def test_picks_a_row_within_a_multi_row_signal(app, server) -> None:
+    _publish(app, "services", [_row("vpn", value="up"), _row("build", value=3)])
+
+    # No row chosen: the first row is used.
+    default = _fetch(app, server, signal="services")
+    assert default["state"] == "fresh"
+    assert default["row_id"] == "vpn"
+    assert default["value"] == "up"
+
+    # A named row is honoured.
+    chosen = _fetch(app, server, signal="services", row_id="build")
+    assert chosen["row_id"] == "build"
+    assert chosen["value"] == 3
+
+    # A named row that isn't present never falls back to another.
+    assert _fetch(app, server, signal="services", row_id="nope")["state"] == "missing"
 
 
 def test_row_timestamp_drives_age(app, server) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
-    _publish(app, [_row("slack_unread", at=_iso(now - timedelta(minutes=30)))], generated=now)
+    _publish(app, "slack_unread", [_row("slack_unread", at=_iso(now - timedelta(minutes=30)))], generated=now)
 
-    fresh_enough = _fetch(app, server, row_id="slack_unread", stale_after=0)
+    fresh_enough = _fetch(app, server, signal="slack_unread", stale_after=0)
     assert fresh_enough["state"] == "fresh"
     assert 1700 < fresh_enough["age"] < 1900
 
-    assert _fetch(app, server, row_id="slack_unread", stale_after=900)["state"] == "stale"
+    assert _fetch(app, server, signal="slack_unread", stale_after=900)["state"] == "stale"
 
 
 def test_expired_snapshot_reads_as_expired(app, server) -> None:
     # The store keeps a tombstone past expiry; the widget must call that out
     # rather than render the last value it saw.
     now = datetime.now(UTC).replace(microsecond=0)
-    _publish(app, [_row("slack_unread")], generated=now)
+    _publish(app, "slack_unread", [_row("slack_unread")], generated=now)
     with app.app_context():
         store = app.config["PERSONAL_DATA_STORE"]
-        record = store.publications("signals")[0]
+        record = store.publications("signals.slack_unread")[0]
         store.put(
-            "signals",
+            "signals.slack_unread",
             snapshot=record["snapshot"],
             generated_epoch=record["generated_epoch"],
             expires_epoch=record["generated_epoch"] - 1,
             publisher_id=record["publisher_id"],
             publisher_name=record["publisher_name"],
         )
-    assert _fetch(app, server, row_id="slack_unread")["state"] == "expired"
+    assert _fetch(app, server, signal="slack_unread")["state"] == "expired"
 
 
-def test_newest_publisher_wins_for_a_shared_row_id(app, server) -> None:
+def test_newest_publisher_wins_for_a_shared_signal(app, server) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
-    _publish(app, [_row("slack_unread", label="Older")], client=CLIENT, generated=now - timedelta(hours=2))
-    _publish(app, [_row("slack_unread", label="Newer")], client=CLIENT_B, generated=now)
+    _publish(app, "slack_unread", [_row("slack_unread", label="Older")], client=CLIENT, generated=now - timedelta(hours=2))
+    _publish(app, "slack_unread", [_row("slack_unread", label="Newer")], client=CLIENT_B, generated=now)
 
-    assert _fetch(app, server, row_id="slack_unread")["publisher"] == "Studio Mac"
+    assert _fetch(app, server, signal="slack_unread")["publisher"] == "Studio Mac"
 
 
-def test_choices_lists_rows_and_names_publishers_when_ambiguous(app, server) -> None:
-    _publish(app, [_row("slack_unread", label="Slack"), _row("build", label="Build")])
+def test_signal_choices_list_published_ids(app, server) -> None:
+    _publish(app, "slack_unread", [_row("slack_unread", label="Slack")])
+    _publish(app, "build", [_row("build", label="Build")])
+    with app.app_context():
+        signals = server.choices("signals")
+    assert {c["value"] for c in signals} == {"slack_unread", "build"}
+    # The label falls back to the newest live row's own label.
+    assert {c["label"] for c in signals} == {"Slack", "Build"}
+    assert server.choices("nope") == []
+
+
+def test_row_choices_name_the_signal_when_ambiguous(app, server) -> None:
+    _publish(app, "services", [_row("vpn", label="VPN"), _row("build", label="Build")])
     with app.app_context():
         single = server.choices("rows")
-    assert [c["label"] for c in single] == ["Build", "Slack"]
-    assert single[0]["value"] == "build"
+    assert {c["value"] for c in single} == {"vpn", "build"}
 
-    _publish(app, [_row("vpn", label="VPN")], client=CLIENT_B)
+    _publish(app, "slack_unread", [_row("slack_unread", label="Slack")])
     with app.app_context():
         multi = server.choices("rows")
-    assert "Studio Mac · VPN" in [c["label"] for c in multi]
-    assert server.choices("nope") == []
+    assert "services · VPN" in [c["label"] for c in multi]
+    assert "slack_unread · Slack" in [c["label"] for c in multi]

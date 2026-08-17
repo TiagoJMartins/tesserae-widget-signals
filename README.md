@@ -7,23 +7,26 @@ automation — without standing up an endpoint for a widget to poll.
 Tesserae already has the right channel for this: the Companion bridge, where a
 paired client PUTs an expiring snapshot and a widget reads it back with no
 network access of its own. What it doesn't have is a *generic* source — the
-host's allowlist is `("reminders", "reminders.fridge")`, validated per source.
-`signals_core` adds one.
+host's allowlist is `("reminders", "reminders.fridge")`, validated per source,
+and it keys storage per `(publisher, source)`. `signals_core` adds a whole
+source *family*: `signals.<id>`, one entry per signal id, following the host's
+own `reminders` / `reminders.fridge` convention.
 
 ## Folders shipped
 
-- `signals_core` — `kind: "data"`. Registers the `signals` personal-data source.
-  No cell of its own.
-- `signals_stat` — `kind: "widget"`. Renders one published row as a hero value
-  or a two-state beacon.
+- `signals_core` — `kind: "data"`. Registers the `signals` personal-data source
+  family (`signals` and any `signals.<id>`). No cell of its own.
+- `signals_stat` — `kind: "widget"`. Renders one published signal as a hero
+  value or a two-state beacon.
 
 Installed together as one catalog bundle; the widget is useless without the
 source, and the source has nothing to show without the widget.
 
 ## The widget
 
-Pick a signal (the picker lists every published row, prefixed with the
-publisher when more than one machine publishes), then choose how it reads:
+Pick a signal (the picker lists every published signal id; a signal that
+carries several rows exposes a second picker for the row within it), then
+choose how it reads:
 
 - **Value** — the row's value as a hero number or string, with its unit.
 - **Beacon** — two states with your own icon and wording per state. `Values
@@ -39,38 +42,46 @@ neighbours.
 
 Three states, not two: `Treat as stale after` seconds (measured against the
 row's own timestamp when the publisher sent one) turns a quiet publisher into a
-visible "No update, last seen 3h ago" rather than a confident OFF. Past the
-server's 48 h expiry the cell says the snapshot expired; a row that vanished
-from a live snapshot reads as missing, and the widget never falls back to a
-different row under the old title.
+visible "No update, last seen 3h ago" rather than a confident OFF. Each signal
+expires on its own clock: past the server's 48 h expiry the cell says the
+snapshot expired; a signal that vanished from a live snapshot reads as missing,
+and the widget never falls back to a different signal or row under the old
+title.
 
 Fragments for the Panels canvas: `full`, `value`, `badge`.
 
 ## How it works
 
-Three module attributes on `app.companion_api`, all read at request time rather
+Four module attributes on `app.companion_api`, all read at request time rather
 than at import, so nothing needs re-registering:
 
 - `PERSONAL_DATA_SOURCES` — the guard in `put_personal_data` and the
-  `personal_data.sources` list in the capability probe.
+  `personal_data.sources` list in the capability probe. Replaced with a
+  container that admits the family root and any `signals.<id>` on membership,
+  and enumerates the concrete ids the store actually holds when listed, so the
+  probe advertises real sources rather than an open-ended pattern.
 - `_validate_reminders_fridge` — the `else` arm of the validator dispatch. Both
-  host validators share a `(source_id, body)` signature, so ours wraps it and
-  delegates anything that isn't `signals`.
+  host validators share a `(source_id, body)` signature, so ours wraps it,
+  validates anything in the `signals` family, and delegates the rest.
+- `personal_data_update_event` / `personal_data_delete_event` — the host builds
+  a change event keyed by the full source id, so a `signals.<id>` PUT would
+  emit `personal_data.signals.<id>` and match no static `on_change`
+  declaration. For a family member the event is rewritten to source
+  `personal_data.signals` with the signal id as its lone selector, which is
+  what `signals_stat` subscribes to. Every other source's event is untouched.
 - `_valid_client` — pairing hard-rejects any platform but `ios`. A Mac or a Pi
   publishing its own state shouldn't have to claim to be an iPhone, so
   `macos`, `linux`, `shortcuts` and `homeassistant` are accepted too and the
   rest of the host's client validation is reused as-is.
 
 Everything else is inherited untouched: pairing and scoped bearer auth,
-latest-only-per-publisher storage, out-of-order and conflict rejection, expiry
-tombstones, and the data-change refresh event (the host already emits a
-whole-source event for source ids it doesn't recognise).
+out-of-order and conflict rejection, and expiry tombstones.
 
 If a host release renames any of them, that part of the patch logs a warning and
 does nothing — the bridge keeps working exactly as it shipped, minus the
-`signals` source (or minus non-iOS pairing). That's the failure mode to expect
-on an upgrade, and the reason the test suite runs against a real app rather than
-a mock.
+`signals` family (or minus non-iOS pairing, or minus the per-signal refresh
+selector). That's the failure mode to expect on an upgrade, and the reason the
+test suite runs against a real app rather than a mock.
 
 ## Publishing a snapshot
 
@@ -83,17 +94,19 @@ TOKEN=$(curl -sS -X POST "$TESSERAE/api/app/v1/pair" \
        "app_version":"0.1.0","installation_id":"<uuid>"}}' | jq -r .token)
 ```
 
-Then PUT rows whenever the state changes:
+Then PUT a signal whenever its state changes. The signal id is the last path
+segment (`signals.<id>`, lowercase `[a-z0-9_-]`, 1–64 chars) and must match the
+body's `source_id`:
 
 ```sh
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 exp=$(date -u -v+12H +%Y-%m-%dT%H:%M:%SZ)   # GNU date: -d '+12 hours'
 
-curl -sS -X PUT "$TESSERAE/api/app/v1/personal-data/signals" \
+curl -sS -X PUT "$TESSERAE/api/app/v1/personal-data/signals.slack_unread" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "$(jq -nc --arg now "$now" --arg exp "$exp" '{
         version: "personal_data_bridge_v1",
-        source_id: "signals",
+        source_id: "signals.slack_unread",
         generated_at: $now,
         expires_at: $exp,
         data: { rows: [
@@ -103,15 +116,21 @@ curl -sS -X PUT "$TESSERAE/api/app/v1/personal-data/signals" \
       }')"
 ```
 
-`GET /api/app/v1/personal-data/status` returns freshness metadata only;
-`DELETE /api/app/v1/personal-data/signals` drops the snapshot.
+A single row per signal is the common case; a signal may also carry a small
+group of related rows, and the widget picks one. Bare `signals` (the family
+root) stays valid for a publisher that wants one combined snapshot.
+
+`GET /api/app/v1/personal-data/status` returns freshness metadata only, one
+entry per published signal; `DELETE /api/app/v1/personal-data/signals.slack_unread`
+drops just that signal.
 
 ## Snapshot schema
 
 Envelope is the host's: `version` must be `personal_data_bridge_v1`, `source_id`
-must match the path, `generated_at` / `expires_at` are ISO 8601 with
-`expires_at > generated_at` and a TTL of at most 48 h (the host treats a
-snapshot as stale after 24 h). `data` carries exactly one key, `rows`.
+must match the path (`signals` or `signals.<id>`), `generated_at` /
+`expires_at` are ISO 8601 with `expires_at > generated_at` and a TTL of at most
+48 h (the host treats a snapshot as stale after 24 h). `data` carries exactly
+one key, `rows`.
 
 | field   | required | shape                                            |
 | ------- | -------- | ------------------------------------------------ |
@@ -132,10 +151,13 @@ need a server change.
 ## Publisher identity and retention
 
 The server derives an opaque publisher id from each pairing, and keeps exactly
-one snapshot per `(publisher, source)`, replaced on each accepted PUT. Several
-machines can publish independently; a widget picking rows can tell them apart.
-Nothing is retained past `expires_at` beyond a timestamp tombstone, which is
-what lets a panel distinguish "expired" from "never synced".
+one snapshot per `(publisher, signal)`. Because the signal id is part of the
+source, one credential can publish `signals.slack_unread` and `signals.door`
+without either erasing the other, and two devices sharing a paired credential
+are safe: each writes its own signal, and a re-PUT replaces only that signal.
+Each signal expires on its own clock. Nothing is retained past `expires_at`
+beyond a timestamp tombstone, which is what lets a panel distinguish "expired"
+from "never synced".
 
 ## Development
 

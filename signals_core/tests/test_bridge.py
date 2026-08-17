@@ -46,16 +46,23 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _snapshot(generated: datetime, *, value: Any = "on", ttl_hours: int = 12) -> dict[str, Any]:
+def _snapshot(
+    generated: datetime,
+    *,
+    source: str = "signals.slack_unread",
+    value: Any = "on",
+    row_id: str = "slack_unread",
+    ttl_hours: int = 12,
+) -> dict[str, Any]:
     return {
         "version": "personal_data_bridge_v1",
-        "source_id": "signals",
+        "source_id": source,
         "generated_at": _iso(generated),
         "expires_at": _iso(generated + timedelta(hours=ttl_hours)),
         "data": {
             "rows": [
                 {
-                    "id": "slack_unread",
+                    "id": row_id,
                     "label": "Slack",
                     "value": value,
                     "unit": None,
@@ -106,7 +113,8 @@ def now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
 
 
-def _put(app, auth, body: dict[str, Any], source: str = "signals"):
+def _put(app, auth, body: dict[str, Any], source: str | None = None):
+    source = source if source is not None else body["source_id"]
     return app.test_client().put(
         f"/api/app/v1/personal-data/{source}", data=json.dumps(body), headers=auth
     )
@@ -117,10 +125,23 @@ def test_source_is_advertised(app, auth) -> None:
     assert "signals" in probe["personal_data"]["sources"]
 
 
+def test_published_signal_ids_are_advertised(app, auth, now) -> None:
+    # The probe enumerates concrete ids the store holds, not just the family
+    # root, so a client can discover what's actually published.
+    assert _put(app, auth, _snapshot(now, source="signals.door")).status_code == 200
+    probe = app.test_client().get("/api/app/v1/", headers=auth).get_json()
+    sources = probe["personal_data"]["sources"]
+    assert "signals" in sources
+    assert "signals.door" in sources
+
+
 def test_host_sources_survive_the_patch(app, auth) -> None:
     from app import companion_api
 
-    assert companion_api.PERSONAL_DATA_SOURCES[:2] == ("reminders", "reminders.fridge")
+    sources = list(companion_api.PERSONAL_DATA_SOURCES)
+    assert sources[:2] == ["reminders", "reminders.fridge"]
+    assert "reminders" in companion_api.PERSONAL_DATA_SOURCES
+    assert "reminders.fridge" in companion_api.PERSONAL_DATA_SOURCES
 
 
 def _pair(app, client: dict[str, str]):
@@ -150,12 +171,40 @@ def test_accepted_snapshot_reaches_the_widget_side(app, auth, now) -> None:
     assert _put(app, auth, _snapshot(now)).status_code == 200
 
     with app.app_context():
-        records = app.config["PERSONAL_DATA_STORE"].publications("signals")
+        records = app.config["PERSONAL_DATA_STORE"].publications("signals.slack_unread")
     assert len(records) == 1
     row = records[0]["snapshot"]["data"]["rows"][0]
     assert row["id"] == "slack_unread"
     assert row["value"] == "on"
     assert records[0]["publisher_id"].startswith("companion_")
+
+
+def test_two_signal_ids_from_one_credential_coexist(app, auth, now) -> None:
+    # The bug this rework fixes: keyed per publisher, the second PUT wiped the
+    # first. Keyed per signal id, both survive under the same credential.
+    assert _put(app, auth, _snapshot(now, source="signals.slack_unread")).status_code == 200
+    assert _put(app, auth, _snapshot(now, source="signals.door")).status_code == 200
+    with app.app_context():
+        store = app.config["PERSONAL_DATA_STORE"]
+        assert len(store.publications("signals.slack_unread")) == 1
+        assert len(store.publications("signals.door")) == 1
+
+
+def test_reput_replaces_only_its_own_signal(app, auth, now) -> None:
+    assert _put(app, auth, _snapshot(now, source="signals.slack_unread", value="on")).status_code == 200
+    assert _put(app, auth, _snapshot(now, source="signals.door", value="shut")).status_code == 200
+    later = now + timedelta(minutes=5)
+    assert (
+        _put(app, auth, _snapshot(later, source="signals.slack_unread", value="off")).status_code
+        == 200
+    )
+    with app.app_context():
+        store = app.config["PERSONAL_DATA_STORE"]
+        slack = store.publications("signals.slack_unread")
+        door = store.publications("signals.door")
+    assert slack[0]["snapshot"]["data"]["rows"][0]["value"] == "off"
+    assert len(door) == 1
+    assert door[0]["snapshot"]["data"]["rows"][0]["value"] == "shut"
 
 
 def test_value_accepts_scalars(app, auth, now) -> None:
@@ -201,8 +250,25 @@ def test_ttl_cap_is_enforced(app, auth, now) -> None:
     assert "retention window" in resp.get_json()["error"]["message"]
 
 
+def test_family_root_still_works(app, auth, now) -> None:
+    assert _put(app, auth, _snapshot(now, source="signals")).status_code == 200
+    with app.app_context():
+        assert len(app.config["PERSONAL_DATA_STORE"].publications("signals")) == 1
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["Bad", "has space", "a.b", "café", "UPPER", "x" * 65, ""],
+)
+def test_malformed_signal_ids_are_refused(app, auth, now, suffix) -> None:
+    source = f"signals.{suffix}"
+    resp = _put(app, auth, _snapshot(now, source=source), source=source)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"]["code"] == "unsupported_personal_data_source"
+
+
 def test_unknown_sources_are_still_rejected(app, auth, now) -> None:
-    resp = _put(app, auth, _snapshot(now), source="nonsense")
+    resp = _put(app, auth, _snapshot(now, source="nonsense"), source="nonsense")
     assert resp.status_code == 400
     assert resp.get_json()["error"]["code"] == "unsupported_personal_data_source"
 
@@ -226,14 +292,36 @@ def test_host_source_still_validates_its_own_shape(app, auth, now) -> None:
         },
     }
     assert _put(app, auth, fridge, source="reminders.fridge").status_code == 200
+    # A signals-shaped snapshot at the fridge path is the host validator's to
+    # refuse: the family dispatch must not swallow another source's path.
     assert _put(app, auth, _snapshot(now), source="reminders.fridge").status_code == 400
 
 
-def test_delete_drops_the_snapshot(app, auth, now) -> None:
-    assert _put(app, auth, _snapshot(now)).status_code == 200
-    assert (
-        app.test_client().delete("/api/app/v1/personal-data/signals", headers=auth).status_code
-        == 204
+def test_remapped_change_event_targets_the_family_with_the_signal_selector(app, now) -> None:
+    from app import companion_api
+
+    event = companion_api.personal_data_update_event(
+        "signals.slack_unread", None, _snapshot(now, source="signals.slack_unread")
     )
+    assert event is not None
+    assert event.source == "personal_data.signals"
+    assert event.selectors == frozenset({"slack_unread"})
+
+    # A host source keeps the host's own source-keyed event untouched.
+    other = companion_api.personal_data_update_event(
+        "reminders.fridge", None, {"data": {"items": []}}
+    )
+    assert other.source == "personal_data.reminders.fridge"
+
+
+def test_delete_of_one_signal_leaves_the_others(app, auth, now) -> None:
+    assert _put(app, auth, _snapshot(now, source="signals.slack_unread")).status_code == 200
+    assert _put(app, auth, _snapshot(now, source="signals.door")).status_code == 200
+    resp = app.test_client().delete(
+        "/api/app/v1/personal-data/signals.slack_unread", headers=auth
+    )
+    assert resp.status_code == 204
     with app.app_context():
-        assert app.config["PERSONAL_DATA_STORE"].publications("signals") == []
+        store = app.config["PERSONAL_DATA_STORE"]
+        assert store.publications("signals.slack_unread") == []
+        assert len(store.publications("signals.door")) == 1
