@@ -1,0 +1,10 @@
+{
+  "tesserae_compat": "1.x",
+  "name": "Signals, Bridge",
+  "version": "0.1.0",
+  "kind": "data",
+  "description": "Widens the Companion personal-data bridge with a generic 'signals' source, so any paired publisher (Shortcuts, a shell script, a Home Assistant automation) can push labelled rows of state to a panel without an HTTP endpoint for a widget to poll.",
+  "icon": "ph-broadcast",
+  "supports": { "sizes": ["xs", "sm", "md", "lg"] },
+  "requires": []
+}
