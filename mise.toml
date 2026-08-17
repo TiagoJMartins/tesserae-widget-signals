@@ -38,7 +38,7 @@ flag "--sizes <sizes>" help="Comma-separated cell sizes to capture" default="lg"
 run = '"$TESSERAE_ROOT/.venv/bin/python" scripts/shot.py --sizes "${usage_sizes:-lg}"'
 
 [tasks.release]
-description = "Tag a release and print the tarball sha256 for the catalog entry"
+description = "Tag a release, upload the install tarball, print the catalog pin"
 raw = true
 usage = '''
 arg "<version>" help="Version to tag, e.g. 0.1.0"
@@ -60,19 +60,44 @@ for manifest in */plugin.json; do
   fi
 done
 
-git tag -a "$tag" -m "$tag"
-git push origin "$tag"
+# A GitHub source archive can't be a bundle: the host unwraps the envelope and
+# then requires every remaining top-level directory to be a plugin folder, so
+# scripts/ alone is enough to make the install refuse. Build the tarball the
+# server actually wants - the plugin folders under one envelope, no tooling,
+# no tests, no .pyc - and ship it as a release asset.
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+envelope="signals-${version}"
+mkdir -p "$stage/$envelope"
+for folder in */plugin.json; do
+  folder="${folder%/plugin.json}"
+  rsync -a --exclude tests/ --exclude '__pycache__/' --exclude '*.pyc' \
+    "$folder" "$stage/$envelope/"
+done
+
+tarball="$stage/${envelope}.tar.gz"
+tar -C "$stage" --numeric-owner --owner=0 --group=0 -czf "$tarball" "$envelope"
+sha=$(shasum -a 256 "$tarball" | cut -d" " -f1)
+
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null || git tag -a "$tag" -m "$tag"
+git push -q origin "$tag"
+
+# --clobber so re-cutting the same version replaces the asset rather than
+# leaving two files a catalog pin could disagree with.
+if gh release view "$tag" >/dev/null 2>&1; then
+  gh release upload "$tag" "$tarball" --clobber
+else
+  gh release create "$tag" "$tarball" --title "$tag" --notes "Install tarball for the Tesserae catalog."
+fi
 
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-url="https://github.com/${repo}/archive/refs/tags/${tag}.tar.gz"
-# GitHub generates the archive on first request; retry until it's there.
+url="https://github.com/${repo}/releases/download/${tag}/${envelope}.tar.gz"
+printf '\ntarball_url: %s\nsha256:      %s\n' "$url" "$sha"
+
+# Fetch it back: the pin is only good if the asset really serves those bytes.
 for _ in 1 2 3 4 5; do
-  if sha=$(curl -sSL --fail "$url" | shasum -a 256 | cut -d" " -f1) && [ -n "$sha" ]; then
-    printf '\ntarball_url: %s\nsha256:      %s\n' "$url" "$sha"
-    exit 0
-  fi
+  remote=$(curl -sSL --fail "$url" | shasum -a 256 | cut -d" " -f1) && break
   sleep 3
 done
-echo "could not fetch $url" >&2
-exit 1
+[ "${remote:-}" = "$sha" ] || { echo "asset at $url does not match the local tarball" >&2; exit 1; }
 '''
