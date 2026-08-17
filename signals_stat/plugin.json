@@ -1,11 +1,18 @@
 {
   "tesserae_compat": "1.x",
   "name": "Signals, Stat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "widget",
   "description": "Render one pushed signal: a hero value, or a two-state beacon with your own icon per state. Publishers (Shortcuts, shell scripts, Home Assistant) PUT rows to the Companion bridge, so the widget makes no network requests and a publisher that stops reads as stale rather than as OFF.",
   "icon": "ph-broadcast",
-  "supports": { "sizes": ["xs", "sm", "md", "lg"] },
+  "supports": {
+    "sizes": [
+      "xs",
+      "sm",
+      "md",
+      "lg"
+    ]
+  },
   "cell_options": [
     {
       "name": "signal",
@@ -36,9 +43,18 @@
       "label": "Presentation",
       "default": "auto",
       "choices": [
-        { "value": "auto", "label": "Auto (beacon when ON states are set)" },
-        { "value": "value", "label": "Value" },
-        { "value": "beacon", "label": "Beacon" }
+        {
+          "value": "auto",
+          "label": "Auto (beacon when ON states are set)"
+        },
+        {
+          "value": "value",
+          "label": "Value"
+        },
+        {
+          "value": "beacon",
+          "label": "Beacon"
+        }
       ]
     },
     {
@@ -99,21 +115,58 @@
       "label": "Accent",
       "default": "accent-1",
       "choices": [
-        { "value": "accent-1", "label": "Terracotta" },
-        { "value": "accent-2", "label": "Ochre" },
-        { "value": "accent-3", "label": "Moss" },
-        { "value": "accent-4", "label": "Teal" },
-        { "value": "accent-5", "label": "Slate" }
+        {
+          "value": "accent-1",
+          "label": "Terracotta"
+        },
+        {
+          "value": "accent-2",
+          "label": "Ochre"
+        },
+        {
+          "value": "accent-3",
+          "label": "Moss"
+        },
+        {
+          "value": "accent-4",
+          "label": "Teal"
+        },
+        {
+          "value": "accent-5",
+          "label": "Slate"
+        }
       ]
     }
   ],
   "fragments": [
-    { "id": "full", "label": "Full card", "w": 300, "h": 180 },
-    { "id": "value", "label": "Value only", "w": 160, "h": 110, "icon": "ph-number-square-one" },
-    { "id": "badge", "label": "Badge", "w": 120, "h": 64, "icon": "ph-bell-ringing" }
+    {
+      "id": "full",
+      "label": "Full card",
+      "w": 300,
+      "h": 180
+    },
+    {
+      "id": "value",
+      "label": "Value only",
+      "w": 160,
+      "h": 110,
+      "icon": "ph-number-square-one"
+    },
+    {
+      "id": "badge",
+      "label": "Badge",
+      "w": 120,
+      "h": 64,
+      "icon": "ph-bell-ringing"
+    }
   ],
   "updates": {
-    "on_change": [{ "source": "personal_data.signals", "selector_option": "signal" }]
+    "on_change": [
+      {
+        "source": "personal_data.signals",
+        "selector_option": "signal"
+      }
+    ]
   },
   "requires": []
 }

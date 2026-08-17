@@ -36,8 +36,13 @@ DEMO_ROWS = [
     {"id": "inbox", "label": "Inbox", "value": 12, "unit": "msgs", "state": "ok"},
     {"id": "vpn", "label": "VPN", "value": "off", "unit": None, "state": "ok"},
 ]
+# 0.2.0 moved the signal id into the source id, so the demo record has to be
+# seeded under the same key the cell reads rather than under the family root.
+SIGNAL_ID = "slack_unread"
+SIGNAL_SOURCE = f"signals.{SIGNAL_ID}"
+
 DEMO_OPTIONS = {
-    "row_id": "slack_unread",
+    "signal": SIGNAL_ID,
     "title": "Slack",
     "on_values": "on,true,1,alert",
     "on_text": "Unread",
@@ -62,10 +67,10 @@ def seed(data_root: Path, variant: str) -> None:
     rows = [{**row, "at": sampled.strftime(fmt)} for row in DEMO_ROWS]
     rows[0] = {**rows[0], "value": value, "state": state}
     store.put(
-        "signals",
+        SIGNAL_SOURCE,
         snapshot={
             "version": "personal_data_bridge_v1",
-            "source_id": "signals",
+            "source_id": SIGNAL_SOURCE,
             "generated_at": sampled.strftime(fmt),
             "expires_at": (sampled + timedelta(hours=12)).strftime(fmt),
             "data": {"rows": rows},

@@ -46,14 +46,6 @@ function matchable(value) {
   return String(value).trim().toLowerCase();
 }
 
-function ago(seconds) {
-  const s = Math.max(0, Number(seconds) || 0);
-  if (s < 90) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-}
-
 function shell(size, body, extraCss = "") {
   return `
     <link rel="stylesheet" href="/static/style/spectra-widgets.css">
@@ -225,19 +217,22 @@ export default function render(shadow, ctx) {
            <h3>${escapeHtml(title)}</h3>
          </div>`;
 
-  // Freshness is the whole point of showing a pushed signal: a quiet publisher
-  // must not read as OFF. Once stale, say so instead of the timestamp alone.
+  // No elapsed counter here. A publisher only writes when its state changes, so
+  // an "Xm ago" line would be the one thing on the cell that keeps moving, and
+  // every tick of it costs a panel refresh for information nobody asked for. The
+  // cell states what the signal is; when it went stale, it says that instead.
   const showMeta = size === "md" || size === "lg";
   const publisher =
     opts.show_publisher && size === "lg" && data.publisher
-      ? ` · ${escapeHtml(String(data.publisher))}`
+      ? escapeHtml(String(data.publisher))
       : "";
-  const meta = showMeta
-    ? `<div class="sg-meta">
-         <i class="ph-bold ${stale ? "ph-warning-circle" : "ph-clock"}"></i>
-         <span>${stale ? `No update, last seen ${escapeHtml(ago(data.age))}` : escapeHtml(ago(data.age))}${publisher}</span>
-       </div>`
-    : "";
+  const meta =
+    showMeta && (stale || publisher)
+      ? `<div class="sg-meta">
+           <i class="ph-bold ${stale ? "ph-warning-circle" : "ph-broadcast"}"></i>
+           <span>${[stale ? "Not reporting" : "", publisher].filter(Boolean).join(" · ")}</span>
+         </div>`
+      : "";
 
   shadow.innerHTML = shell(size, `${head}${valueEl}${meta}`, emphasis);
 }
