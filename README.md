@@ -58,8 +58,9 @@ than at import, so nothing needs re-registering:
 - `PERSONAL_DATA_SOURCES` — the guard in `put_personal_data` and the
   `personal_data.sources` list in the capability probe. Replaced with a
   container that admits the family root and any `signals.<id>` on membership,
-  and enumerates the concrete ids the store actually holds when listed, so the
-  probe advertises real sources rather than an open-ended pattern.
+  and lists only the family root: the probe is unauthenticated and promises to
+  leak no household content, which publisher-chosen slugs like `bedroom_door`
+  would. A paired client discovers ids from `/personal-data/status` instead.
 - `_validate_reminders_fridge` — the `else` arm of the validator dispatch. Both
   host validators share a `(source_id, body)` signature, so ours wraps it,
   validates anything in the `signals` family, and delegates the rest.

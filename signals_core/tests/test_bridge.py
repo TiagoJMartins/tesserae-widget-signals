@@ -125,14 +125,14 @@ def test_source_is_advertised(app, auth) -> None:
     assert "signals" in probe["personal_data"]["sources"]
 
 
-def test_published_signal_ids_are_advertised(app, auth, now) -> None:
-    # The probe enumerates concrete ids the store holds, not just the family
-    # root, so a client can discover what's actually published.
+def test_published_signal_ids_stay_off_the_probe(app, auth, now) -> None:
+    # The probe is unauthenticated and promises to leak no household content, so
+    # it advertises the family root and never the publisher's own slugs.
     assert _put(app, auth, _snapshot(now, source="signals.door")).status_code == 200
-    probe = app.test_client().get("/api/app/v1/", headers=auth).get_json()
-    sources = probe["personal_data"]["sources"]
+    unauthenticated = app.test_client().get("/api/app/v1/").get_json()
+    sources = unauthenticated["personal_data"]["sources"]
     assert "signals" in sources
-    assert "signals.door" in sources
+    assert not [sid for sid in sources if sid.startswith("signals.")]
 
 
 def test_host_sources_survive_the_patch(app, auth) -> None:

@@ -49,8 +49,6 @@ import logging
 import re
 from typing import Any
 
-from flask import current_app, has_app_context
-
 from app import companion_api as _host
 
 SOURCE_ID = "signals"
@@ -97,36 +95,20 @@ def _in_family(source_id: Any) -> bool:
     return source_id == SOURCE_ID or _signal_id(source_id) is not None
 
 
-def _known_signal_sources() -> list[str]:
-    """Concrete ``signals.*`` source ids currently in the store.
-
-    Read at request time from the app's store; empty outside an app context
-    (import, say) so the capability probe never advertises a fabricated id.
-    """
-    if not has_app_context():
-        return []
-    store = current_app.config.get("PERSONAL_DATA_STORE")
-    if store is None:
-        return []
-    lister = getattr(store, "all", None)
-    if not callable(lister):
-        return []
-    try:
-        known = lister()
-    except Exception:
-        return []
-    if not isinstance(known, dict):
-        return []
-    return sorted(sid for sid in known if _signal_id(sid) is not None)
-
-
 class _SignalsSources:
     """Source allowlist admitting the whole ``signals`` family.
 
     Wraps the host's original tuple so ``reminders`` and ``reminders.fridge``
     still resolve. ``__contains__`` backs the ``put_personal_data`` guard;
-    ``__iter__`` backs ``list(PERSONAL_DATA_SOURCES)`` in the capability probe,
-    reporting the family root plus every signal id the store actually holds.
+    ``__iter__`` backs ``list(PERSONAL_DATA_SOURCES)`` in the capability probe.
+
+    The probe advertises the family root only, never the live signal ids. It is
+    unauthenticated and promises to leak no household content, and publisher
+    chosen slugs are exactly that: "bedroom_door" tells an unauthenticated
+    caller something about the house. Enumerating ids would also mean a GET
+    reads the snapshot store, which opportunistically redacts expired entries -
+    a write on an unauthenticated path. A client learns which ids it may see
+    from ``/personal-data/status``, which requires the bearer.
     """
 
     def __init__(self, base: tuple[str, ...]) -> None:
@@ -137,9 +119,8 @@ class _SignalsSources:
 
     def __iter__(self) -> Any:
         ordered = list(self._base)
-        for sid in (SOURCE_ID, *_known_signal_sources()):
-            if sid not in ordered:
-                ordered.append(sid)
+        if SOURCE_ID not in ordered:
+            ordered.append(SOURCE_ID)
         return iter(ordered)
 
     def __repr__(self) -> str:
