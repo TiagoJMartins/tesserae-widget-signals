@@ -147,12 +147,17 @@ is the host's and the only honest harness is the host itself. `TESSERAE_ROOT` in
 mise run test                    # both folders' tests, against a real app
 mise run serve                   # dev server, this bundle loaded from ./.dev-data
 mise run shot --sizes lg,md,sm,xs   # screenshots into the sibling catalog checkout
-mise run release 0.1.0           # tag, push, print tarball URL + sha256
+mise run release 0.1.0           # tag, upload the install tarball, print the pin
 ```
 
 `mise run shot` seeds a demo snapshot into the dev server's store and drives
 `/_test/render`, which is loopback-exempt from the auth gate. `--variant off`
 and `--variant stale` produce the catalog's carousel extras.
+
+The catalog pins a release *asset*, not GitHub's source archive. For a bundle the
+host requires every top-level directory in the tarball to be a plugin folder, so
+`scripts/` alone would refuse the install; `mise run release` stages just the
+plugin folders under one envelope and uploads that.
 
 ## Install
 
