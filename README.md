@@ -14,10 +14,41 @@ host's allowlist is `("reminders", "reminders.fridge")`, validated per source.
 
 - `signals_core` — `kind: "data"`. Registers the `signals` personal-data source.
   No cell of its own.
+- `signals_stat` — `kind: "widget"`. Renders one published row as a hero value
+  or a two-state beacon.
+
+Installed together as one catalog bundle; the widget is useless without the
+source, and the source has nothing to show without the widget.
+
+## The widget
+
+Pick a signal (the picker lists every published row, prefixed with the
+publisher when more than one machine publishes), then choose how it reads:
+
+- **Value** — the row's value as a hero number or string, with its unit.
+- **Beacon** — two states with your own icon and wording per state. `Values
+  that count as ON` is matched against the row's `state` first and its `value`
+  second, so a publisher can name states (`alert` / `ok`) or just send a value.
+  Auto mode picks beacon whenever ON values are configured.
+
+Emphasis scales with the cell: at `xs`/`sm` an ON beacon flips the whole tile to
+the accent fill (contrast, which survives a 1-bit dither, rather than hue), and
+at `xs` it drops to the glyph alone rather than truncating a word. At `md`/`lg`
+it uses the soft accent wash so a half-panel cell doesn't shout over its
+neighbours.
+
+Three states, not two: `Treat as stale after` seconds (measured against the
+row's own timestamp when the publisher sent one) turns a quiet publisher into a
+visible "No update, last seen 3h ago" rather than a confident OFF. Past the
+server's 48 h expiry the cell says the snapshot expired; a row that vanished
+from a live snapshot reads as missing, and the widget never falls back to a
+different row under the old title.
+
+Fragments for the Panels canvas: `full`, `value`, `badge`.
 
 ## How it works
 
-Two module attributes on `app.companion_api`, both read at request time rather
+Three module attributes on `app.companion_api`, all read at request time rather
 than at import, so nothing needs re-registering:
 
 - `PERSONAL_DATA_SOURCES` — the guard in `put_personal_data` and the
@@ -25,16 +56,21 @@ than at import, so nothing needs re-registering:
 - `_validate_reminders_fridge` — the `else` arm of the validator dispatch. Both
   host validators share a `(source_id, body)` signature, so ours wraps it and
   delegates anything that isn't `signals`.
+- `_valid_client` — pairing hard-rejects any platform but `ios`. A Mac or a Pi
+  publishing its own state shouldn't have to claim to be an iPhone, so
+  `macos`, `linux`, `shortcuts` and `homeassistant` are accepted too and the
+  rest of the host's client validation is reused as-is.
 
 Everything else is inherited untouched: pairing and scoped bearer auth,
 latest-only-per-publisher storage, out-of-order and conflict rejection, expiry
 tombstones, and the data-change refresh event (the host already emits a
 whole-source event for source ids it doesn't recognise).
 
-If a host release renames either attribute, the patch logs a warning and does
-nothing — the bridge keeps working exactly as it shipped, minus the `signals`
-source. That's the failure mode to expect on an upgrade, and the reason the test
-suite runs against a real app rather than a mock.
+If a host release renames any of them, that part of the patch logs a warning and
+does nothing — the bridge keeps working exactly as it shipped, minus the
+`signals` source (or minus non-iOS pairing). That's the failure mode to expect
+on an upgrade, and the reason the test suite runs against a real app rather than
+a mock.
 
 ## Publishing a snapshot
 
@@ -101,22 +137,30 @@ machines can publish independently; a widget picking rows can tell them apart.
 Nothing is retained past `expires_at` beyond a timestamp tombstone, which is
 what lets a panel distinguish "expired" from "never synced".
 
-## Tests
+## Development
 
-Against a real Tesserae app, with the plugin loaded from a throwaway data root:
+Everything runs against a local Tesserae checkout, because the plugin contract
+is the host's and the only honest harness is the host itself. `TESSERAE_ROOT` in
+`mise.toml` points at it.
 
 ```sh
-TESSERAE_ROOT=~/Projects/TiagoJMartins/tesserae \
-  ~/Projects/TiagoJMartins/tesserae/.venv/bin/python -m pytest signals_core/ -q
+mise run test                    # both folders' tests, against a real app
+mise run serve                   # dev server, this bundle loaded from ./.dev-data
+mise run shot --sizes lg,md,sm,xs   # screenshots into the sibling catalog checkout
+mise run release 0.1.0           # tag, push, print tarball URL + sha256
 ```
 
-## Status
+`mise run shot` seeds a demo snapshot into the dev server's store and drives
+`/_test/render`, which is loopback-exempt from the auth gate. `--variant off`
+and `--variant stale` produce the catalog's carousel extras.
 
-The display widget isn't here yet — this repo currently ships the bridge only,
-so it installs through the authored-plugin path rather than the catalog (the
-catalog's `kind` enum has no `data`; a data plugin reaches it as part of a
-bundle). The widget lands as `signals_stat`, and the catalog entry becomes one
-bundle with `folders: ["signals_core", "signals_stat"]`.
+## Install
+
+One catalog entry installs both folders. It's published through
+[TiagoJMartins/tesserae-widgets](https://github.com/TiagoJMartins/tesserae-widgets):
+point a server's **Marketplace catalog URL** at that index, then Settings →
+Widgets → Browse → Install. A restart loads `signals_core`, which is when the
+`signals` source starts being advertised.
 
 ## License
 

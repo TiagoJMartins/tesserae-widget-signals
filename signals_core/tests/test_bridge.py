@@ -123,6 +123,29 @@ def test_host_sources_survive_the_patch(app, auth) -> None:
     assert companion_api.PERSONAL_DATA_SOURCES[:2] == ("reminders", "reminders.fridge")
 
 
+def _pair(app, client: dict[str, str]):
+    code = app.config["COMPANION_PAIRING_STORE"].issue(note="test").code
+    return app.test_client().post(
+        "/api/app/v1/pair",
+        data=json.dumps({"code": code, "client": client}),
+        content_type="application/json",
+    )
+
+
+@pytest.mark.parametrize("platform", ["macos", "linux", "shortcuts", "homeassistant"])
+def test_non_ios_publishers_can_pair_as_themselves(app, platform) -> None:
+    resp = _pair(app, {**CLIENT, "platform": platform})
+    assert resp.status_code == 201, resp.get_json()
+    assert "personal_data:write" in resp.get_json()["scopes"]
+
+
+def test_pairing_still_rejects_junk_clients(app) -> None:
+    # The widened path must reuse the host's other client checks, not skip them.
+    assert _pair(app, {**CLIENT, "platform": "toaster"}).status_code == 400
+    assert _pair(app, {**CLIENT, "platform": "macos", "installation_id": "short"}).status_code == 400
+    assert _pair(app, {**CLIENT, "platform": "macos", "name": ""}).status_code == 400
+
+
 def test_accepted_snapshot_reaches_the_widget_side(app, auth, now) -> None:
     assert _put(app, auth, _snapshot(now)).status_code == 200
 

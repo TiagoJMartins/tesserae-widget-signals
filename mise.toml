@@ -1,0 +1,78 @@
+# Everything here runs against a local Tesserae checkout: the plugin contract is
+# the host's, so the only honest test harness is the host itself.
+[env]
+TESSERAE_ROOT = "{{env.HOME}}/Projects/TiagoJMartins/tesserae"
+
+[tasks.test]
+description = "Run the bundle's tests against a real Tesserae app"
+raw = true
+run = '"$TESSERAE_ROOT/.venv/bin/python" -m pytest -q "$@"'
+
+[tasks.serve]
+description = "Start the Tesserae dev server with this bundle loaded from a scratch data root"
+raw = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The dev server scans <data_root>/authored, so a symlink per folder is enough
+# to iterate without copying files on every edit.
+DATA_ROOT="${SIGNALS_DATA_ROOT:-$PWD/.dev-data}"
+mkdir -p "$DATA_ROOT/authored"
+for folder in signals_core signals_stat; do
+  ln -snf "$PWD/$folder" "$DATA_ROOT/authored/$folder"
+done
+
+echo "data root: $DATA_ROOT"
+echo "render:    http://127.0.0.1:8765/_test/render?plugin=signals_stat&size=lg"
+cd "$TESSERAE_ROOT"
+TESSERAE_DATA_ROOT="$DATA_ROOT" exec .venv/bin/python -m app.main --dev
+'''
+
+[tasks.shot]
+description = "Capture screenshots of signals_stat from a running dev server"
+raw = true
+usage = '''
+flag "--sizes <sizes>" help="Comma-separated cell sizes to capture" default="lg"
+'''
+run = '"$TESSERAE_ROOT/.venv/bin/python" scripts/shot.py --sizes "${usage_sizes:-lg}"'
+
+[tasks.release]
+description = "Tag a release and print the tarball sha256 for the catalog entry"
+raw = true
+usage = '''
+arg "<version>" help="Version to tag, e.g. 0.1.0"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+version="$usage_version"
+tag="v${version}"
+
+# Every plugin folder's manifest carries its own version; the catalog pins one
+# per entry, so a mismatch means the Browse card would advertise a version the
+# tarball doesn't contain.
+for manifest in */plugin.json; do
+  declared=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$manifest")
+  if [ "$declared" != "$version" ]; then
+    echo "$manifest declares $declared, not $version" >&2
+    exit 1
+  fi
+done
+
+git tag -a "$tag" -m "$tag"
+git push origin "$tag"
+
+repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+url="https://github.com/${repo}/archive/refs/tags/${tag}.tar.gz"
+# GitHub generates the archive on first request; retry until it's there.
+for _ in 1 2 3 4 5; do
+  if sha=$(curl -sSL --fail "$url" | shasum -a 256 | cut -d" " -f1) && [ -n "$sha" ]; then
+    printf '\ntarball_url: %s\nsha256:      %s\n' "$url" "$sha"
+    exit 0
+  fi
+  sleep 3
+done
+echo "could not fetch $url" >&2
+exit 1
+'''

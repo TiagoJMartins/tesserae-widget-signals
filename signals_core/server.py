@@ -14,7 +14,7 @@ conflict rejection, expiry tombstones, and the data-change refresh event
 (``app.data_change_refresh`` already emits a whole-source event for source ids
 it doesn't know, so no patch is needed there).
 
-Two module attributes are patched, both read at request time rather than at
+Three module attributes are patched, all read at request time rather than at
 import, so no route needs re-registering:
 
   * ``PERSONAL_DATA_SOURCES`` — the guard in ``put_personal_data`` and the
@@ -22,9 +22,13 @@ import, so no route needs re-registering:
   * ``_validate_reminders_fridge`` — the ``else`` arm of the validator
     dispatch. Both host validators share a ``(source_id, body)`` signature, so
     ours wraps it and delegates anything that isn't ``signals``.
+  * ``_valid_client`` — pairing hard-rejects any platform but ``ios``. A Mac or
+    a Pi publishing its own state shouldn't have to claim to be an iPhone, so a
+    few more platform names are accepted and the rest of the host's client
+    validation is reused as-is.
 
-A host refactor that renames either attribute leaves the bridge exactly as it
-shipped: the patch logs and does nothing rather than breaking uploads.
+A host refactor that renames any of them leaves that part of the bridge exactly
+as it shipped: the patch logs and does nothing rather than breaking uploads.
 """
 
 from __future__ import annotations
@@ -35,6 +39,10 @@ from typing import Any
 from app import companion_api as _host
 
 SOURCE_ID = "signals"
+
+# Platforms accepted at pairing on top of the host's ``ios``. Kept short and
+# explicit; this is a label on a credential, not a capability gate.
+EXTRA_PLATFORMS = frozenset(("macos", "linux", "shortcuts", "homeassistant"))
 
 MAX_ROWS = 64
 MAX_ID = 128
@@ -135,6 +143,36 @@ def _validate_signals(
     return (body, gen, exp), None
 
 
+def _install_platforms() -> None:
+    """Let a non-iOS publisher pair as itself.
+
+    ``_valid_client`` hard-rejects any ``platform`` but ``"ios"``, which is
+    right for the Companion app and wrong for the publishers this source exists
+    to serve: a Mac, a Pi, a Shortcut. Rather than have them claim to be an
+    iPhone, accept a short allowlist and reuse the host's validation for
+    everything else (name length, app_version, installation_id bounds) by
+    handing it an ios-shaped copy and restoring the real platform after.
+    """
+    original = getattr(_host, "_valid_client", None)
+    if not callable(original):
+        logger.warning("signals_core: no _valid_client to widen; iOS-only pairing stands")
+        return
+
+    def widened(client: Any) -> dict[str, Any] | None:
+        if not isinstance(client, dict):
+            return original(client)  # type: ignore[misc]
+        platform = client.get("platform")
+        if platform == "ios" or platform not in EXTRA_PLATFORMS:
+            return original(client)  # type: ignore[misc]
+        checked = original({**client, "platform": "ios"})  # type: ignore[misc]
+        if checked is None:
+            return None
+        return {**checked, "platform": platform}
+
+    _host._valid_client = widened
+    logger.info("signals_core: pairing widened to platforms %s", sorted(EXTRA_PLATFORMS))
+
+
 def _install() -> None:
     sources = getattr(_host, "PERSONAL_DATA_SOURCES", None)
     fallback = getattr(_host, "_validate_reminders_fridge", None)
@@ -160,3 +198,4 @@ def _install() -> None:
 
 
 _install()
+_install_platforms()
